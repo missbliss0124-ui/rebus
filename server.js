@@ -14,19 +14,19 @@ const W = 900;
 const H = 1600;
 const FPS = 30;
 
-const BROWN = '0x5A3210';
 const GREEN = '0x1E7A1E';
+const DIGIT_COLOR = '0xD00000';   // цвет цифры среза (красный)
 const BORDER = 'white';
 
-const QUESTION_FONT = 40;
-const HOOK_FONT = 40;
-const ANSWER_FONT = 34;
+const IMG = 300;                  // размер картинки 300x300
+const DIGIT_FONT = 110;           // ~120px высотой
+const ANSWER_FONT = 90;
 
-// === РАСПОЛОЖЕНИЕ ТЕКСТА (по разметке) ===
-const QUESTION_CY = 529;             // центр вопроса: 529,3 пкс от верха
-const ANSWER_CY = [785, 890, 999,5];  // центры ответов: нижний опущен на 20px (991 -> 999,5)
-const QUESTION_WRAP = 24;
-const ANSWER_WRAP = 22;
+// центры картинок (по разметке): верх = word1, низ = word2, по центру X=450
+const IMG1_CX = 450, IMG1_CY = 451;
+const IMG2_CX = 450, IMG2_CY = 751;
+const DIGIT_GAP = 20;             // отступ цифры от края картинки
+const ANSWER_CY = 1200;          // центр ответа
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
@@ -39,50 +39,45 @@ function esc(s) {
     .replace(/\r?\n/g, ' ');
 }
 
-function wrap(text, maxChars) {
-  const words = String(text == null ? '' : text).trim().split(/\s+/);
-  const lines = [];
-  let cur = '';
-  for (const w of words) {
-    if (!cur) { cur = w; continue; }
-    if ((cur + ' ' + w).length <= maxChars) { cur += ' ' + w; }
-    else { lines.push(cur); cur = w; }
-  }
-  if (cur) lines.push(cur);
-  return lines.length ? lines : [''];
+// цифра сбоку от картинки: prefix -> справа, suffix -> слева
+function digitDraw({ text, cut, imgCX, imgCY, appear }) {
+  const right = String(cut).toLowerCase() === 'prefix';
+  const cx = right
+    ? (imgCX + IMG / 2 + DIGIT_GAP + DIGIT_FONT / 2)
+    : (imgCX - IMG / 2 - DIGIT_GAP - DIGIT_FONT / 2);
+  return [
+    'drawtext=fontfile=' + FONT,
+    "text='" + esc(text) + "'",
+    'fontsize=' + DIGIT_FONT,
+    'fontcolor=' + DIGIT_COLOR,
+    'borderw=4',
+    'bordercolor=' + BORDER,
+    'x=(' + cx + '-text_w/2)',
+    'y=(' + imgCY + '-text_h/2)',
+    "enable='gte(t," + appear + ")'",
+  ].join(':');
 }
 
-function drawtext({ text, fontsize, color, cy, enable }) {
-  const lineH = Math.round(fontsize * 1.28);
-  const lines = Array.isArray(text) ? text : [text];
-  const n = lines.length;
-  const startY = Math.round(cy - (n * lineH) / 2 + lineH / 2);
-  return lines.map((ln, i) => {
-    const y = startY + i * lineH - Math.round(fontsize / 2);
-    return [
-      'drawtext=fontfile=' + FONT,
-      "text='" + esc(ln) + "'",
-      'fontsize=' + fontsize,
-      'fontcolor=' + color,
-      'borderw=3',
-      'bordercolor=' + BORDER,
-      'x=(w-text_w)/2',
-      'y=' + y,
-      "enable='" + enable + "'",
-    ].join(':');
-  });
+function answerDraw({ text, cy, appear }) {
+  return [
+    'drawtext=fontfile=' + FONT,
+    "text='" + esc(text) + "'",
+    'fontsize=' + ANSWER_FONT,
+    'fontcolor=' + GREEN,
+    'borderw=4',
+    'bordercolor=' + BORDER,
+    'x=(w-text_w)/2',
+    'y=(' + cy + '-text_h/2)',
+    "enable='gte(t," + appear + ")'",
+  ].join(':');
 }
 
 app.post(
   '/render',
   upload.fields([
     { name: 'fon', maxCount: 1 },
-    { name: 'topleft', maxCount: 1 },
-    { name: 'inscription', maxCount: 1 },
-    { name: 'animal', maxCount: 1 },
-    { name: 'item', maxCount: 1 },
-    { name: 'transport', maxCount: 1 },
-    { name: 'niz-pravo', maxCount: 1 },
+    { name: 'img1', maxCount: 1 },
+    { name: 'img2', maxCount: 1 },
   ]),
   (req, res) => {
     let payload = {};
@@ -90,107 +85,67 @@ app.post(
     catch (e) { return res.status(400).json({ error: 'BAD_PAYLOAD', detail: String(e) }); }
 
     const f = req.files || {};
-    const need = ['fon', 'topleft', 'inscription', 'animal', 'item', 'transport', 'niz-pravo'];
-    for (const k of need) {
+    for (const k of ['fon', 'img1', 'img2']) {
       if (!f[k] || !f[k][0]) return res.status(400).json({ error: 'MISSING_FILE', field: k });
     }
 
     const t = payload.timings || {};
-    const duration = Number(payload.duration) || Number(t.duration) || 13;
-    const hookStart = Number(t.hook_start != null ? t.hook_start : 0);
-    const questionStart = Number(t.question_start != null ? t.question_start : 3);
-    const answerStart = Number(t.answer_start != null ? t.answer_start : 4);
-    const answerStep = Number(t.answer_step != null ? t.answer_step : 0.3);
-    const revealStart = Number(t.reveal_start != null ? t.reveal_start : 9);
+    const start = Number(t.start != null ? t.start : 2);
+    const step = Number(t.step != null ? t.step : 0.3);
+    const answerReveal = Number(t.answer_reveal != null ? t.answer_reveal : 13.2);
+    const duration = Number(t.duration != null ? t.duration : (payload.duration || 15));
 
-    const question = payload.question || '';
-    const hook = payload.hook || '';
-    const answers = Array.isArray(payload.answers) ? payload.answers : [];
-    const correctIndex = (Number(payload.correct_answer_position) || 1) - 1;
+    const answer = payload.answer || '';
+    const digit1 = payload.digit1 != null ? String(payload.digit1) : '';
+    const digit2 = payload.digit2 != null ? String(payload.digit2) : '';
+    const cut1 = payload.cut1 || 'prefix';
+    const cut2 = payload.cut2 || 'suffix';
+
+    // порядок появления: img1(2.0) -> digit1(2.3) -> img2(2.6) -> digit2(2.9)
+    const tImg1 = start;
+    const tDig1 = start + step;
+    const tImg2 = start + 2 * step;
+    const tDig2 = start + 3 * step;
 
     const outPath = path.join(os.tmpdir(), 'out_' + Date.now() + '.mp4');
 
     const segs = [];
-    segs.push('[0:v]scale=' + W + ':' + H + ',setsar=1,fps=' + FPS + '[b]');
-    segs.push('[b][1:v]overlay=0:0[o1]');
-    segs.push('[o1][2:v]overlay=0:0[o2]');
-    segs.push('[o2][3:v]overlay=0:0[o3]');
-    segs.push('[o3][4:v]overlay=0:0[o4]');
-    segs.push('[o4][5:v]overlay=0:0[o5]');
-    segs.push('[o5][6:v]overlay=0:0[o6]');
+    segs.push('[0:v]scale=' + W + ':' + H + ',setsar=1,fps=' + FPS + '[bg]');
+    segs.push('[1:v]scale=' + IMG + ':' + IMG + '[p1]');
+    segs.push('[2:v]scale=' + IMG + ':' + IMG + '[p2]');
+    // картинки в позиции (top-left = center - IMG/2), с таймингом появления
+    segs.push('[bg][p1]overlay=x=' + (IMG1_CX - IMG / 2) + ':y=' + (IMG1_CY - IMG / 2) +
+              ":enable='gte(t," + tImg1 + ")'[o1]");
+    segs.push('[o1][p2]overlay=x=' + (IMG2_CX - IMG / 2) + ':y=' + (IMG2_CY - IMG / 2) +
+              ":enable='gte(t," + tImg2 + ")'[o2]");
 
     const draws = [];
+    if (digit1) draws.push(digitDraw({ text: digit1, cut: cut1, imgCX: IMG1_CX, imgCY: IMG1_CY, appear: tDig1 }));
+    if (digit2) draws.push(digitDraw({ text: digit2, cut: cut2, imgCX: IMG2_CX, imgCY: IMG2_CY, appear: tDig2 }));
+    if (answer) draws.push(answerDraw({ text: answer, cy: ANSWER_CY, appear: answerReveal }));
 
-    if (hook) {
-      draws.push(...drawtext({
-        text: wrap(hook, QUESTION_WRAP),
-        fontsize: HOOK_FONT, color: BROWN, cy: QUESTION_CY,
-        enable: 'between(t,' + hookStart + ',' + questionStart + ')',
-      }));
-    }
-
-    if (question) {
-      draws.push(...drawtext({
-        text: wrap(question, QUESTION_WRAP),
-        fontsize: QUESTION_FONT, color: BROWN, cy: QUESTION_CY,
-        enable: 'gte(t,' + questionStart + ')',
-      }));
-    }
-
-    for (let i = 0; i < 3; i++) {
-      const ans = answers[i];
-      if (ans == null) continue;
-      const appear = answerStart + i * answerStep;
-      const cy = ANSWER_CY[i] != null ? ANSWER_CY[i] : (785 + i * 105);
-      const wrapped = wrap(ans, ANSWER_WRAP);
-
-      if (i === correctIndex) {
-        draws.push(...drawtext({
-          text: wrapped, fontsize: ANSWER_FONT, color: BROWN, cy,
-          enable: 'between(t,' + appear + ',' + revealStart + ')',
-        }));
-        draws.push(...drawtext({
-          text: wrapped, fontsize: ANSWER_FONT, color: GREEN, cy,
-          enable: 'gte(t,' + revealStart + ')',
-        }));
-      } else {
-        draws.push(...drawtext({
-          text: wrapped, fontsize: ANSWER_FONT, color: BROWN, cy,
-          enable: 'between(t,' + appear + ',' + revealStart + ')',
-        }));
-      }
-    }
-
-    let prev = 'o6';
+    let prev = 'o2';
     draws.forEach((d, idx) => {
       const out = 'd' + idx;
       segs.push('[' + prev + ']' + d + '[' + out + ']');
       prev = out;
     });
     if (draws.length === 0) {
-      segs.push('[o6]null[vout]');
-      prev = 'vout';
+      segs.push('[o2]null[vout]');
     } else {
       segs[segs.length - 1] = segs[segs.length - 1].replace('[' + prev + ']', '[vout]');
-      prev = 'vout';
     }
 
     const filterComplex = segs.join(';');
 
     const args = [
       '-y',
-      // fon теперь ВИДЕО (.mp4) — используем -stream_loop, а НЕ -loop
-      '-stream_loop', '-1', '-i', f.fon[0].path,
-      // остальные 6 слоёв — картинки (PNG), им нужен -loop 1
-      '-loop', '1', '-i', f.topleft[0].path,
-      '-loop', '1', '-i', f.inscription[0].path,
-      '-loop', '1', '-i', f.animal[0].path,
-      '-loop', '1', '-i', f.item[0].path,
-      '-loop', '1', '-i', f.transport[0].path,
-      '-loop', '1', '-i', f['niz-pravo'][0].path,
+      '-stream_loop', '-1', '-i', f.fon[0].path,   // фон-видео (loop)
+      '-loop', '1', '-i', f.img1[0].path,           // картинка word1
+      '-loop', '1', '-i', f.img2[0].path,           // картинка word2
       '-filter_complex', filterComplex,
       '-map', '[vout]',
-      '-map', '0:a?',            // ← звук из фонового видео (fon), необязательный
+      '-map', '0:a?',
       '-t', String(duration),
       '-r', String(FPS),
       '-pix_fmt', 'yuv420p',
@@ -198,9 +153,9 @@ app.post(
       '-preset', 'ultrafast',
       '-threads', '2',
       '-filter_complex_threads', '1',
-      '-c:a', 'aac',             // ← аудиокодек
+      '-c:a', 'aac',
       '-b:a', '192k',
-      '-shortest',               // ← обрезать по видео (зацикленный фон не тянет длину)
+      '-shortest',
       '-movflags', '+faststart',
       outPath,
     ];
