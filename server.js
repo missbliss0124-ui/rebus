@@ -15,19 +15,20 @@ const H = 1600;
 const FPS = 30;
 
 const GREEN = '0x1E7A1E';
-const DIGIT_COLOR = '0xD00000';   // цвет цифры среза (красный)
+const DIGIT_COLOR = '0xD00000';
 const BORDER = 'white';
 
-const IMG = 300;                  // размер картинки 300x300
-const DIGIT_FONT = 110;           // ~120px высотой
+const IMG = 300;
+const DIGIT_FONT = 110;
 const ANSWER_FONT = 90;
 
-// центры строк по вертикали: верх = word1, низ = word2
+const COL1_CX = 300;
+const COL2_CX = 600;
 const ROW1_CY = 451;
 const ROW2_CY = 751;
-const DIGIT_GAP = 20;             // отступ цифры от края картинки
-const DIGIT_CHAR_W = 60;          // приблизительная ширина одного символа цифры (для центрирования блока)
-const ANSWER_CY = 1000;           // центр ответа
+const ANSWER_CY = 1000;
+
+const OVERLAY_NAMES = ['topleft', 'item', 'transport', 'nizpravo'];
 
 app.get('/health', (req, res) => res.json({ ok: true }));
 
@@ -40,25 +41,12 @@ function esc(s) {
     .replace(/\r?\n/g, ' ');
 }
 
-// Центрируем пару "картинка + цифра" как единый блок по центру канвы (X=450).
-// prefix -> цифра справа от картинки; suffix -> цифра слева.
-function layoutRow(cut, digitText) {
+function layoutRow(cut) {
   const isPrefix = String(cut).toLowerCase() === 'prefix';
-  const digitW = Math.max(1, String(digitText).length) * DIGIT_CHAR_W;
-  const unitW = IMG + DIGIT_GAP + digitW;
-  const leftEdge = W / 2 - unitW / 2;
-  let imgCX, digitCX;
-  if (isPrefix) {
-    imgCX = leftEdge + IMG / 2;
-    digitCX = leftEdge + IMG + DIGIT_GAP + digitW / 2;
-  } else {
-    digitCX = leftEdge + digitW / 2;
-    imgCX = leftEdge + digitW + DIGIT_GAP + IMG / 2;
-  }
-  return { imgCX, digitCX };
+  if (isPrefix) return { imgCX: COL1_CX, digitCX: COL2_CX };
+  return { imgCX: COL2_CX, digitCX: COL1_CX };
 }
 
-// цифра сбоку от картинки (позиция блока уже вычислена в layoutRow)
 function digitDraw({ text, digitCX, rowCY, appear }) {
   return [
     'drawtext=fontfile=' + FONT,
@@ -93,6 +81,10 @@ app.post(
     { name: 'fon', maxCount: 1 },
     { name: 'img1', maxCount: 1 },
     { name: 'img2', maxCount: 1 },
+    { name: 'topleft', maxCount: 1 },
+    { name: 'item', maxCount: 1 },
+    { name: 'transport', maxCount: 1 },
+    { name: 'nizpravo', maxCount: 1 },
   ]),
   (req, res) => {
     let payload = {};
@@ -116,11 +108,9 @@ app.post(
     const cut1 = payload.cut1 || 'prefix';
     const cut2 = payload.cut2 || 'suffix';
 
-    // раскладка пар "картинка + цифра", центрированных как единый блок
-    const r1 = layoutRow(cut1, digit1);
-    const r2 = layoutRow(cut2, digit2);
+    const r1 = layoutRow(cut1);
+    const r2 = layoutRow(cut2);
 
-    // порядок появления: img1(2.0) -> digit1(2.3) -> img2(2.6) -> digit2(2.9)
     const tImg1 = start;
     const tDig1 = start + step;
     const tImg2 = start + 2 * step;
@@ -128,40 +118,56 @@ app.post(
 
     const outPath = path.join(os.tmpdir(), 'out_' + Date.now() + '.mp4');
 
+    const args = ['-y'];
+    args.push('-stream_loop', '-1', '-i', f.fon[0].path);
+    args.push('-loop', '1', '-i', f.img1[0].path);
+    args.push('-loop', '1', '-i', f.img2[0].path);
+    let idx = 3;
+    const overlayInputs = [];
+    for (const nm of OVERLAY_NAMES) {
+      if (f[nm] && f[nm][0]) { args.push('-loop', '1', '-i', f[nm][0].path); overlayInputs.push({ nm, idx }); idx++; }
+    }
+
     const segs = [];
     segs.push('[0:v]scale=' + W + ':' + H + ',setsar=1,fps=' + FPS + '[bg]');
+    let last = 'bg';
+
+    overlayInputs.forEach((ov, i) => {
+      const sc = 'fr' + i;
+      segs.push('[' + ov.idx + ':v]scale=' + W + ':' + H + '[' + sc + ']');
+      const out = 'ov' + i;
+      segs.push('[' + last + '][' + sc + ']overlay=0:0[' + out + ']');
+      last = out;
+    });
+
     segs.push('[1:v]scale=' + IMG + ':' + IMG + '[p1]');
     segs.push('[2:v]scale=' + IMG + ':' + IMG + '[p2]');
-    // картинки в позиции (top-left = center - IMG/2), с таймингом появления
-    segs.push('[bg][p1]overlay=x=' + Math.round(r1.imgCX - IMG / 2) + ':y=' + (ROW1_CY - IMG / 2) +
+    segs.push('[' + last + '][p1]overlay=x=' + (r1.imgCX - IMG / 2) + ':y=' + (ROW1_CY - IMG / 2) +
               ":enable='gte(t," + tImg1 + ")'[o1]");
-    segs.push('[o1][p2]overlay=x=' + Math.round(r2.imgCX - IMG / 2) + ':y=' + (ROW2_CY - IMG / 2) +
+    segs.push('[o1][p2]overlay=x=' + (r2.imgCX - IMG / 2) + ':y=' + (ROW2_CY - IMG / 2) +
               ":enable='gte(t," + tImg2 + ")'[o2]");
+    last = 'o2';
 
     const draws = [];
-    if (digit1) draws.push(digitDraw({ text: digit1, digitCX: Math.round(r1.digitCX), rowCY: ROW1_CY, appear: tDig1 }));
-    if (digit2) draws.push(digitDraw({ text: digit2, digitCX: Math.round(r2.digitCX), rowCY: ROW2_CY, appear: tDig2 }));
+    if (digit1) draws.push(digitDraw({ text: digit1, digitCX: r1.digitCX, rowCY: ROW1_CY, appear: tDig1 }));
+    if (digit2) draws.push(digitDraw({ text: digit2, digitCX: r2.digitCX, rowCY: ROW2_CY, appear: tDig2 }));
     if (answer) draws.push(answerDraw({ text: answer, cy: ANSWER_CY, appear: answerReveal }));
 
-    let prev = 'o2';
-    draws.forEach((d, idx) => {
-      const out = 'd' + idx;
+    let prev = last;
+    draws.forEach((d, i2) => {
+      const out = 'd' + i2;
       segs.push('[' + prev + ']' + d + '[' + out + ']');
       prev = out;
     });
     if (draws.length === 0) {
-      segs.push('[o2]null[vout]');
+      segs.push('[' + last + ']null[vout]');
     } else {
       segs[segs.length - 1] = segs[segs.length - 1].replace('[' + prev + ']', '[vout]');
     }
 
     const filterComplex = segs.join(';');
 
-    const args = [
-      '-y',
-      '-stream_loop', '-1', '-i', f.fon[0].path,   // фон-видео (loop)
-      '-loop', '1', '-i', f.img1[0].path,           // картинка word1
-      '-loop', '1', '-i', f.img2[0].path,           // картинка word2
+    args.push(
       '-filter_complex', filterComplex,
       '-map', '[vout]',
       '-map', '0:a?',
@@ -176,8 +182,8 @@ app.post(
       '-b:a', '192k',
       '-shortest',
       '-movflags', '+faststart',
-      outPath,
-    ];
+      outPath
+    );
 
     const ff = spawn('ffmpeg', args);
     let stderr = '';
